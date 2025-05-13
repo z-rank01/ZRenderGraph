@@ -14,6 +14,8 @@
 #include <string>     // Required for std::string
 #include <map>        // Required for std::map
 #include <iostream>
+#include <atomic>
+#include <memory>
 
 namespace vra
 {
@@ -77,6 +79,53 @@ namespace vra
         RarelyOrNever
     };
 
+    class ResourceIDGenerator
+    {
+        using AtomicResourceId = std::atomic<ResourceId>;
+    public:
+        ResourceIDGenerator() = default;
+        ~ResourceIDGenerator() = default;
+
+        /// @brief generate resource id
+        /// @param type_name
+        /// @return resource id
+        ResourceId GenerateID(const std::string& type_name)
+        {
+            auto it = type_id_table_.find(type_name);
+            if (it != type_id_table_.end())
+            {
+                // Atomically get the current value and then increment through the unique_ptr
+                return it->second->fetch_add(1);
+            }
+            else
+            {
+                // Type not registered, handle error (e.g., return invalid ID or assert)
+                std::cerr << "Error: Resource type '" << type_name << "' not registered in ResourceIDGenerator." << std::endl;
+                return std::numeric_limits<ResourceId>::max(); // Indicate invalid ID
+            }
+        }
+
+        /// @brief register resource type
+        /// @param type_name
+        void RegisterType(const std::string& type_name)
+        {
+            // create new atomic resource id using unique_ptr
+            if (type_id_table_.find(type_name) == type_id_table_.end())
+            {
+                type_id_table_.emplace(type_name, std::make_unique<AtomicResourceId>(0));
+            }
+            else
+            {
+                // Type already registered, do nothing or log a warning
+                std::cerr << "Warning: Resource type '" << type_name << "' already registered in ResourceIDGenerator." << std::endl;
+            }
+        }
+
+    private:
+        // Use unique_ptr to store atomic counters to avoid non-copyable/non-movable issues
+        std::unordered_map<std::string, std::unique_ptr<AtomicResourceId>> type_id_table_;
+    };
+
     struct VraRawData
     {
         const void *pData_ = nullptr;
@@ -114,14 +163,27 @@ namespace vra
         VkBufferCreateInfo buffer_create_info_;
     };
 
+
     class VraDataBatcher
     {
+    public:
+        VraDataBatcher() = delete;
+        VraDataBatcher(VkPhysicalDevice physical_device) : physical_device_handle_(physical_device)
+        {
+            vkGetPhysicalDeviceProperties(physical_device, &physical_device_properties_);
+            RegisterDefaultBatcher();
+        }
+        ~VraDataBatcher();
+
+        // --- Batch Handle ---
+
         /// @brief VraBatchHandle is a struct that contains a vector of uint8_t, an unordered_map of ResourceId and size_t, and a VraDataDesc.
         /// @brief VraBatchHandle is used to store batch information like consolidated data, offsets, and data description.
         struct VraBatchHandle
         {
             bool initialized = false;
             std::vector<uint8_t> consolidated_data;
+            std::vector<ResourceId> resource_ids;
             std::unordered_map<ResourceId, size_t> offsets;
             VraDataDesc data_desc;
 
@@ -129,10 +191,90 @@ namespace vra
             {
                 initialized = false;
                 consolidated_data.clear();
+                resource_ids.clear();
                 offsets.clear();
                 data_desc = VraDataDesc{};
             }
         };
+
+        // --- Data Process ---
+
+        /// @brief Collects buffer data description and raw data pointer.
+        /// @param type_name The type name of the resource, used for ID generation.
+        /// @param data_desc Description of the buffer data (usage, memory pattern, etc.).
+        /// @param data Raw data pointer and size. The pointer pData_ must remain valid until Batch is called.
+        /// @return The generated ResourceId if collected successfully, or std::numeric_limits<ResourceId>::max() if failed.
+        /// @note The **order** in which Collect is called for different resources will **determine** their order in the batched buffer!
+        ResourceId Collect(const std::string& type_name, VraDataDesc data_desc, VraRawData data);
+
+        /// @brief processes all collected buffer data, grouping them into batches
+        void Batch();
+
+        /// @brief clear all collected data and grouped data
+        void Clear();
+
+        // --- Batcher Registration and Access ---
+
+        /// @brief register a custom batching strategy
+        /// @param batch_id register batch id
+        /// @param predicate predicate before grouping
+        /// @param batch_method action when grouping
+        void RegisterBatcher(
+            const BatchId batch_id,
+            std::function<bool(const VraDataDesc &)> predicate,
+            std::function<void(ResourceId id, VraBatchHandle &batch, const VraDataDesc &data_desc, const VraRawData &data)> batch_method);
+
+        /// @brief get batch data
+        /// @param batch_id batch id
+        /// @return batch data
+        const VraBatchHandle* GetBatch(const BatchId& batch_id) const
+        {
+            auto it = batch_id_to_index_map_.find(batch_id);
+            if (it != batch_id_to_index_map_.end())
+            {
+                if (it->second < registered_batchers_.size())
+                {
+                    return &registered_batchers_[it->second].batch_handle;
+                }
+            }
+            return nullptr;
+        }
+
+        /// @brief get resource offset
+        /// @param batch_id batch id
+        /// @param id resource id
+        /// @return resource offset
+        size_t GetResourceOffset(BatchId batch_id, ResourceId id) const
+        {
+            const auto* batch = GetBatch(batch_id);
+            if (batch)
+            {
+                 auto it = batch->offsets.find(id);
+                 if (it != batch->offsets.end())
+                 {
+                     return it->second;
+                 }
+            }
+            // Handle error: batch_id or resource_id not found
+            std::cerr << "Error: Resource offset not found for Batch ID '" << batch_id << "' and Resource ID '" << id << "'" << std::endl;
+            return std::numeric_limits<size_t>::max(); // Indicate invalid offset
+        }
+
+        // --- Memory Allocation Flags Suggestion ---
+
+        /// @brief get suggest memory flags for vulkan
+        /// @param batch_id batch id
+        /// @return suggest memory flags
+        VkMemoryPropertyFlags GetSuggestMemoryFlags(BatchId batch_id);
+
+        /// @brief get suggest vma memory flags for vulkan
+        /// @param batch_id batch id
+        /// @return suggest vma memory flags
+        VmaAllocationCreateFlags GetSuggestVmaMemoryFlags(BatchId batch_id);
+
+    private :
+
+        // --- Batcher and Data Handle ---
 
         /// @brief VraBatcher is a struct that contains a batch id, a predicate, and a batch method.
         /// @brief VraBatcher is used to batch buffer data by memory pattern and update rate according to the predicate with the batch method
@@ -148,119 +290,40 @@ namespace vra
             VraBatchHandle batch_handle; // Each strategy instance owns its data
         };
 
-    public:
-        VraDataBatcher() = delete;
-        VraDataBatcher(VkPhysicalDevice physical_device) : physical_device_handle_(physical_device) 
+        /// @brief VraDataHandle is a struct that contains a resource id, a type name, a data description, and a raw data.
+        /// @brief VraDataHandle is used to store collected data
+        struct VraDataHandle
         {
-            vkGetPhysicalDeviceProperties(physical_device, &physical_device_properties_);
-            RegisterDefaultBatcher();
-        }
-        ~VraDataBatcher();
-        
-        // --- Data Process ---
+            ResourceId id;
+            std::string type_name;
+            VraDataDesc data_desc;
+            VraRawData raw_data;
+        };
 
-        /// @brief Collects buffer data description and raw data pointer.
-        /// @param data_desc Description of the buffer data (usage, memory pattern, etc.).
-        /// @param data Raw data pointer and size. The pointer pData_ must remain valid until Execute is called.
-        /// @return True if collected successfully, false if ID already exists or max count reached.
-        bool Collect(VraDataDesc data_desc, VraRawData data, ResourceId& id);
-
-        /// @brief processes all collected buffer data, grouping them by memory pattern
-        void Batch();
-
-        /// @brief clear all collected data and grouped data
-        void Clear();
-
-        // --- Data Access ---
-
-        /// @brief register buffer batch strategy
-        /// @param batch_id register batch id
-        /// @param predicate predicate before grouping
-        /// @param batch_method action when grouping
-        void RegisterBatcher(
-            const BatchId batch_id,
-            std::function<bool(const VraDataDesc &)> predicate,
-            std::function<void(ResourceId id, VraBatchHandle &batch, const VraDataDesc &data_desc, const VraRawData &data)> batch_method);
-
-        /// @brief get batch index
-        /// @param batch_id batch id
-        /// @return batch index
-        size_t GetBatchIndex(const BatchId& batch_id) const
-        {
-            auto it = batch_id_to_index_map_.find(batch_id);
-            if (it != batch_id_to_index_map_.end())
-            {
-                return it->second;
-            }
-            return std::numeric_limits<size_t>::max();
-        }
-
-        /// @brief get batch data
-        /// @param batch_id batch id
-        /// @return batch data
-        const VraBatchHandle* GetBatch(const BatchId& batch_id) const
-        {
-            auto it = batch_id_to_index_map_.find(batch_id);
-            if (it != batch_id_to_index_map_.end())
-            {
-                if (it->second < registered_batchers_.size())
-                { // Boundary check
-                    return &registered_batchers_[it->second].batch_handle;
-                }
-            }
-            return nullptr;
-        }
-        
-        /// @brief get all batch ids
-        /// @return all batch ids
-        std::vector<BatchId> GetAllBatchIDs() const 
-        { 
-            std::vector<BatchId> ids;
-            for (const auto& batch : registered_batchers_) {
-                ids.push_back(batch.batch_id);
-            }
-            return ids;
-        }
-
-        size_t GetResourceOffset(BatchId batch_id, ResourceId id) const
-        {
-            return GetBatch(batch_id)->offsets.at(id);
-        }
-        
-        /// @brief get suggest memory flags for vulkan
-        /// @param batch_id batch id
-        /// @return suggest memory flags
-        VkMemoryPropertyFlags GetSuggestMemoryFlags(BatchId batch_id);
-
-        /// @brief get suggest vma memory flags for vulkan
-        /// @param batch_id batch id
-        /// @return suggest vma memory flags
-        VmaAllocationCreateFlags GetSuggestVmaMemoryFlags(BatchId batch_id);
-
-    private :
         // --- Vulkan Native Objects Cache ---
-        
+
         VkPhysicalDevice physical_device_handle_;
         VkPhysicalDeviceProperties physical_device_properties_;
 
-        // --- Buffer specific storage ---
-        
-        std::unordered_map<ResourceId, VraDataDesc> buffer_desc_map_;   // TODO: Optimize to use vector
-        std::unordered_map<ResourceId, VraRawData> buffer_data_map_;    // TODO: Optimize to use vector
+        // --- Collected Data Storage ---
+
+        std::vector<VraDataHandle> collected_data_;
 
         // --- Limits ---
-        
-        static constexpr size_t MAX_BUFFER_COUNT = 4096;
 
-        // --- Registered Group Strategies ---
+        ResourceIDGenerator id_generator_;
+        static constexpr size_t MAX_BUFFER_COUNT = 4096; // Consider if this limit is still necessary/appropriate with the new structure
+
+        // --- Registered Batchers ---
 
         std::vector<VraBatcher> registered_batchers_;
-        std::map<BatchId, size_t> batch_id_to_index_map_;
+        std::map<BatchId, size_t> batch_id_to_index_map_; // Use map for sorted iteration if needed, or keep unordered_map for speed
+
 
         /// @brief clear grouped buffer data
         void ClearBatch();
 
-        /// @brief register default grouping strategies
+        /// @brief register default batchers
         void RegisterDefaultBatcher();
     };
 

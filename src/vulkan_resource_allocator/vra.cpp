@@ -49,6 +49,10 @@ namespace vra
             {
                 const auto &current_item_buffer_create_info = desc.GetBufferCreateInfo();
 
+                // --------------------------
+                // ---- initialize batch ----
+                // --------------------------
+
                 if (!batch.initialized)
                 {
                     batch.data_desc = desc; // Initialize the batch's entire VraDataDesc
@@ -73,6 +77,16 @@ namespace vra
                     }
                 }
 
+                // -------------------------
+                // ---- add resource id ----
+                // -------------------------
+
+                batch.resource_ids.push_back(id);
+
+                // ---------------------------
+                // ---- add data to batch ----
+                // ---------------------------
+
                 if (raw_data.pData_ != nullptr && raw_data.size_ > 0)
                 {
                     batch.offsets[id] = batch.consolidated_data.size();
@@ -83,6 +97,10 @@ namespace vra
                 {
                     batch.offsets[id] = batch.consolidated_data.size();
                 }
+
+                // ----------------------------
+                // ---- update buffer size ----
+                // ----------------------------
 
                 batch.data_desc.GetBufferCreateInfo().size = batch.consolidated_data.size();
             });
@@ -100,11 +118,15 @@ namespace vra
                 // Get a modifiable reference to the batch's VkBufferCreateInfo
                 auto &batch_ci_ref = batch.data_desc.GetBufferCreateInfo();
 
+                // -----------------------------
+                // ---- combine buffer info ----
+                // -----------------------------
+
                 if (!batch.initialized)
                 {
                     batch.data_desc = desc; // Initialize the batch's entire VraDataDesc
                     batch.initialized = true;
-                    // batch_ci_ref now refers to the CI within the newly set batch.data_desc
+                    // batch_ci_ref now refers to the CI within the newly set batch.data_desc                    
                 }
                 else if (current_item_buffer_create_info.usage == 0 || 
                          current_item_buffer_create_info.sharingMode != batch_ci_ref.sharingMode)
@@ -124,7 +146,16 @@ namespace vra
                     }
                 }
 
-                // Combine data with alignment
+                // -------------------------
+                // ---- add resource id ----
+                // -------------------------
+
+                batch.resource_ids.push_back(id);
+
+                // ---------------------------------
+                // -- combine data with alignment --
+                // ---------------------------------
+
                 size_t base_offset_for_item = batch.consolidated_data.size();
                 size_t aligned_offset_for_item = base_offset_for_item;
 
@@ -147,12 +178,20 @@ namespace vra
 
                 batch.offsets[id] = aligned_offset_for_item; // Store the correctly aligned offset
 
+                // -------------------------
+                // --- add data to batch ---
+                // -------------------------
+
                 if (raw_data.pData_ != nullptr && raw_data.size_ > 0)
                 {
                     const uint8_t *data_ptr = static_cast<const uint8_t *>(raw_data.pData_);
                     batch.consolidated_data.insert(batch.consolidated_data.end(), data_ptr, data_ptr + raw_data.size_);
                 }
-                
+
+                // ----------------------------
+                // ---- update buffer size ----
+                // ----------------------------
+
                 batch_ci_ref.size = batch.consolidated_data.size();
             });
 
@@ -168,6 +207,10 @@ namespace vra
                 const auto &current_item_buffer_create_info = desc.GetBufferCreateInfo();
                 // Get a modifiable reference to the batch's VkBufferCreateInfo
                 auto &batch_ci_ref = batch.data_desc.GetBufferCreateInfo();
+
+                // -----------------------------
+                // ---- combine buffer info ----
+                // -----------------------------
 
                 if (!batch.initialized)
                 {
@@ -193,7 +236,16 @@ namespace vra
                     }
                 }
 
-                // Combine data with alignment
+                // -------------------------
+                // ---- add resource id ----
+                // -------------------------
+
+                batch.resource_ids.push_back(id);
+
+                // ---------------------------------
+                // -- combine data with alignment --
+                // ---------------------------------
+
                 size_t base_offset_for_item = batch.consolidated_data.size();
                 size_t aligned_offset_for_item = base_offset_for_item;
 
@@ -226,23 +278,31 @@ namespace vra
             });
     }
 
-    bool VraDataBatcher::Collect(VraDataDesc desc, VraRawData data, ResourceId &id)
+    ResourceId VraDataBatcher::Collect(const std::string &type_name, VraDataDesc data_desc, VraRawData data)
     {
+        // generate resource id
+        ResourceId next_id = id_generator_.GenerateID(type_name);
+        if (next_id == std::numeric_limits<ResourceId>::max())
+        {
+            std::cout << "Registering type: " << type_name << std::endl;
+            id_generator_.RegisterType(type_name);
+            next_id = id_generator_.GenerateID(type_name);
+        }
+
         // check buffer conditions
-        if (desc.GetBufferCreateInfo().usage == 0 ||
-            buffer_desc_map_.size() >= MAX_BUFFER_COUNT ||
-            buffer_desc_map_.count(id) ||
+        if (data_desc.GetBufferCreateInfo().usage == 0 ||
+            collected_data_.size() >= MAX_BUFFER_COUNT ||
             data.pData_ == nullptr ||
             data.size_ == 0)
         {
-            return false;
+            std::cerr << "Error: Failed to collect buffer data for type '" << type_name << "'" << std::endl;
+            return std::numeric_limits<ResourceId>::max();
         }
 
         // store buffer data
-        buffer_desc_map_[id] = desc;
-        buffer_data_map_[id] = data;
+        collected_data_.emplace_back(next_id, type_name, data_desc, data);
 
-        return true;
+        return next_id;
     }
 
     VkMemoryPropertyFlags VraDataBatcher::GetSuggestMemoryFlags(BatchId batch_id)
@@ -337,8 +397,7 @@ namespace vra
 
     void VraDataBatcher::Clear()
     {
-        buffer_desc_map_.clear();
-        buffer_data_map_.clear();
+        collected_data_.clear();
         ClearBatch();
     }
 
@@ -348,13 +407,10 @@ namespace vra
 
         // Optional: Estimate sizes and reserve capacity
         std::vector<size_t> estimated_batch_sizes(registered_batchers_.size(), 0);
-        for (const auto &buffer_pair : buffer_data_map_)
+        for (const auto &data_handle : collected_data_)
         {
-            const VraRawData &raw_data = buffer_pair.second;
-            auto desc_it = buffer_desc_map_.find(buffer_pair.first);
-            if (desc_it == buffer_desc_map_.end())
-                continue;
-            const VraDataDesc &desc = desc_it->second;
+            const VraRawData &raw_data = data_handle.raw_data;
+            const VraDataDesc &desc = data_handle.data_desc;
 
             for (size_t i = 0; i < registered_batchers_.size(); ++i)
             {
@@ -377,14 +433,11 @@ namespace vra
         }
 
         // Batch data
-        for (const auto &pair : buffer_data_map_)
+        for (const auto &data_handle : collected_data_)
         {
-            ResourceId id = pair.first;
-            const VraRawData &raw_data = pair.second;
-            auto desc_it = buffer_desc_map_.find(id);
-            if (desc_it == buffer_desc_map_.end())
-                continue;
-            const VraDataDesc &desc = desc_it->second;
+            ResourceId id = data_handle.id;
+            const VraRawData &raw_data = data_handle.raw_data;
+            const VraDataDesc &desc = data_handle.data_desc;
 
             for (auto &strategy : registered_batchers_)
             {

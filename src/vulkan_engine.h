@@ -165,13 +165,20 @@ private:
     VmaAllocationInfo uniform_buffer_allocation_info_;
     std::unique_ptr<vra::VraDataBatcher> vra_data_batcher_;
 
-    // TODO: change to dynamic
-    vra::ResourceId vertex_data_id_ = 0;
-    vra::ResourceId index_data_id_ = 1;
-    vra::ResourceId staging_vertex_data_id_ = 2;
-    vra::ResourceId staging_index_data_id_ = 3;
+    // vra resource id
+    std::vector<vra::ResourceId> vertex_index_data_id_;
+    std::vector<vra::ResourceId> staging_data_id_;
     std::vector<vra::ResourceId> uniform_buffer_id_;
 
+    // vra resource type name
+    std::string vertex_index_data_type_name_ = "vertex_index_data";
+    std::string staging_data_type_name_ = "staging_data";
+    std::string uniform_buffer_type_name_ = "uniform_buffer";
+
+    // vra data batcher output
+    const vra::VraDataBatcher::VraBatchHandle *vertex_index_data_batch_;
+    const vra::VraDataBatcher::VraBatchHandle *staging_data_batch_;
+    const vra::VraDataBatcher::VraBatchHandle *uniform_buffer_batch_;
 
     // vulkan native members
     VkBuffer local_buffer_;
