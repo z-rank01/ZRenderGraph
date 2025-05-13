@@ -175,10 +175,6 @@ private:
     std::string staging_data_type_name_ = "staging_data";
     std::string uniform_buffer_type_name_ = "uniform_buffer";
 
-    // vra data batcher output
-    const vra::VraDataBatcher::VraBatchHandle *vertex_index_data_batch_;
-    const vra::VraDataBatcher::VraBatchHandle *staging_data_batch_;
-    const vra::VraDataBatcher::VraBatchHandle *uniform_buffer_batch_;
 
     // vulkan native members
     VkBuffer local_buffer_;

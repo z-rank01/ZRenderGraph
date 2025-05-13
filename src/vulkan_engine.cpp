@@ -710,8 +710,8 @@ bool VulkanEngine::CreateVertexInputBuffers()
 
     // generate vertex and index buffers and allocate memory
 
-    vertex_index_data_batch_ = vra_data_batcher_->GetBatch(vra::VraBuiltInBatchIds::GPU_Only);
-    if (!vertex_index_data_batch_ || vertex_index_data_batch_->offsets.size() == 0)
+    auto local_batch = vra_data_batcher_->GetBatch(vra::VraBuiltInBatchIds::GPU_Only);
+    if (!local_batch || local_batch->offsets.size() == 0)
     {
         Logger::LogError("Failed to get vertex index data batch(From vra)");
         return false;
@@ -722,7 +722,7 @@ bool VulkanEngine::CreateVertexInputBuffers()
     alloc_info.flags = vra_data_batcher_->GetSuggestVmaMemoryFlags(vra::VraBuiltInBatchIds::GPU_Only);
     if (!Logger::LogWithVkResult(vmaCreateBuffer(
                                      vma_allocator_,
-                                     &vertex_index_data_batch_->data_desc.GetBufferCreateInfo(),
+                                     &local_batch->data_desc.GetBufferCreateInfo(),
                                      &alloc_info,
                                      &local_buffer_,
                                      &local_buffer_allocation_,
@@ -733,10 +733,10 @@ bool VulkanEngine::CreateVertexInputBuffers()
 
     // generate staging buffer and copy data
 
-    staging_data_batch_ = vra_data_batcher_->GetBatch(vra::VraBuiltInBatchIds::CPU_GPU_Rarely);
-    if (!staging_data_batch_ || staging_data_batch_->offsets.size() == 0)
+    auto host_batch = vra_data_batcher_->GetBatch(vra::VraBuiltInBatchIds::CPU_GPU_Rarely);
+    if (!host_batch || host_batch->offsets.size() == 0)
     {
-        Logger::LogError("Failed to get staging data batch(From vra)");
+        Logger::LogError("Failed to get host data batch(From vra)");
         return false;
     }
 
@@ -745,7 +745,7 @@ bool VulkanEngine::CreateVertexInputBuffers()
     staging_alloc_info.flags = vra_data_batcher_->GetSuggestVmaMemoryFlags(vra::VraBuiltInBatchIds::CPU_GPU_Rarely);
     if (!Logger::LogWithVkResult(vmaCreateBuffer(
                                      vma_allocator_,
-                                     &staging_data_batch_->data_desc.GetBufferCreateInfo(),
+                                     &host_batch->data_desc.GetBufferCreateInfo(),
                                      &staging_alloc_info,
                                      &staging_buffer_,
                                      &staging_buffer_allocation_,
@@ -758,9 +758,9 @@ bool VulkanEngine::CreateVertexInputBuffers()
 
     void *mapped_data = nullptr;
     
-    vmaInvalidateAllocation(vma_allocator_, staging_buffer_allocation_, 0, staging_data_batch_->consolidated_data.size());
+    vmaInvalidateAllocation(vma_allocator_, staging_buffer_allocation_, 0, host_batch->consolidated_data.size());
     vmaMapMemory(vma_allocator_, staging_buffer_allocation_, &mapped_data);
-    memcpy(mapped_data, staging_data_batch_->consolidated_data.data(), staging_data_batch_->consolidated_data.size());
+    memcpy(mapped_data, host_batch->consolidated_data.data(), host_batch->consolidated_data.size());
     vmaUnmapMemory(vma_allocator_, staging_buffer_allocation_);
     vmaFlushAllocation(vma_allocator_, staging_buffer_allocation_, 0, staging_buffer_allocation_info_.size);
 
@@ -805,8 +805,8 @@ bool VulkanEngine::CreateUniformBuffers()
 
     vra_data_batcher_->Batch();
 
-    uniform_buffer_batch_ = vra_data_batcher_->GetBatch(vra::VraBuiltInBatchIds::CPU_GPU_Frequently);
-    if (!uniform_buffer_batch_ || uniform_buffer_batch_->offsets.size() == 0)
+    auto uniform_batch = vra_data_batcher_->GetBatch(vra::VraBuiltInBatchIds::CPU_GPU_Frequently);
+    if (!uniform_batch || uniform_batch->offsets.size() == 0)
     {
         Logger::LogError("Failed to get uniform buffer data batch(From vra)");
         return false;
@@ -818,7 +818,7 @@ bool VulkanEngine::CreateUniformBuffers()
     allocation_create_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     if (!Logger::LogWithVkResult(vmaCreateBuffer(
                                      vma_allocator_,
-                                     &uniform_buffer_batch_->data_desc.GetBufferCreateInfo(),
+                                     &uniform_batch->data_desc.GetBufferCreateInfo(),
                                      &allocation_create_info,
                                      &uniform_buffer_,
                                      &uniform_buffer_allocation_,
